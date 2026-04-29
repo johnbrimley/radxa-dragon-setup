@@ -1,14 +1,14 @@
 #!/bin/bash
-# arr stack setup: Prowlarr + Sonarr + Radarr + Jellyseerr
+# arr stack setup: Prowlarr + Sonarr + Radarr + Seerr (via Docker)
 #
-# All services run as dedicated users in the 'media' group so they can
-# read/write the shared data folders set up by setup-qbittorrent.sh.
+# All arr services run as dedicated users in the 'media' group.
+# Seerr runs as a Docker container bound to localhost:5055.
 #
 # Ports:
-#   Prowlarr:   http://<ip>:9696
-#   Radarr:     http://<ip>:7878
-#   Sonarr:     http://<ip>:8989
-#   Jellyseerr: http://<ip>:5055
+#   Prowlarr:  http://<ip>:9696
+#   Radarr:    http://<ip>:7878
+#   Sonarr:    http://<ip>:8989
+#   Seerr:     http://<ip>:5055
 #
 # Usage: sudo ./setup-arr.sh /path/to/data/root
 # Example: sudo ./setup-arr.sh /srv/media
@@ -22,21 +22,13 @@ DATA_ROOT="${1:-}"
 MEDIA_GROUP="media"
 INSTALL_BASE="/opt"
 CONFIG_BASE="/var/lib"
-ARCH="linux-arm64"
-
-# App definitions: name, github repo, port, binary name
-declare -A APP_REPOS=(
-    [prowlarr]="Prowlarr/Prowlarr"
-    [sonarr]="Sonarr/Sonarr"
-    [radarr]="Radarr/Radarr"
-    [jellyseerr]="Fallenbagel/jellyseerr"
-)
+SEERR_CONFIG="/var/lib/seerr"
+SEERR_PORT=5055
 
 declare -A APP_PORTS=(
     [prowlarr]="9696"
     [sonarr]="8989"
     [radarr]="7878"
-    [jellyseerr]="5055"
 )
 
 # --- Helpers ---
@@ -62,36 +54,37 @@ get_latest_release_url() {
         | grep -i "$pattern" \
         | grep -v sha256 \
         | grep -v blockmap \
+        | grep -v musl \
         | head -1 \
         | cut -d'"' -f4
 }
 
-wait_for_port() {
+wait_for_service() {
     local name="$1"
     local port="$2"
-    local timeout="${3:-30}"
-    log "Waiting for $name to respond on port $port (up to ${timeout}s)..."
+    local timeout="${3:-45}"
+    log "Waiting for ${name} on port ${port} (up to ${timeout}s)..."
     for i in $(seq 1 "$timeout"); do
         if curl -sf --max-time 2 "http://localhost:${port}" &>/dev/null; then
-            log "$name is up."
+            log "${name} is up."
             return 0
         fi
         sleep 1
         echo -n "."
     done
     echo ""
-    warn "$name did not respond after ${timeout}s. It may still be initializing."
-    warn "Check: journalctl -u $name -n 50"
+    warn "${name} did not respond after ${timeout}s - may still be initializing."
+    warn "Check: journalctl -u ${name} -n 50"
     return 1
 }
 
 install_arr_app() {
-    local name="$1"        # e.g. prowlarr
-    local repo="$2"        # e.g. Prowlarr/Prowlarr
-    local port="$3"        # e.g. 9696
-    local url_pattern="$4" # grep pattern for release asset
-    local binary="$5"      # binary name inside tarball
-    local data_arg="$6"    # data directory CLI arg format
+    local name="$1"
+    local repo="$2"
+    local port="$3"
+    local url_pattern="$4"
+    local binary="$5"
+    local data_flag="$6"
 
     local install_dir="${INSTALL_BASE}/${name}"
     local config_dir="${CONFIG_BASE}/${name}"
@@ -116,22 +109,23 @@ install_arr_app() {
     fi
     usermod -aG "$MEDIA_GROUP" "$app_user"
 
-    # --- Create config dir ---
+    # --- Config dir ---
     mkdir -p "$config_dir"
     chown -R "${app_user}:${MEDIA_GROUP}" "$config_dir"
 
-    # --- Download and install binary ---
-    log "Fetching latest ${name^} release URL..."
-    local download_url
-    download_url=$(get_latest_release_url "$repo" "$url_pattern")
-    [[ -z "$download_url" ]] && die "Could not find release URL for ${name^}. Check GitHub API rate limits."
-    log "Downloading: $download_url"
+    # --- Download ---
+    log "Fetching latest ${name^} release..."
+    local url
+    url=$(get_latest_release_url "$repo" "$url_pattern")
+    [[ -z "$url" ]] && die "Could not find ${name^} ARM64 release. Check: https://github.com/${repo}/releases"
+    log "Downloading: $url"
 
     local tmp_dir
-    tmp_dir=$(mktemp -d /tmp/${name}-install.XXXXXX)
-    curl -L --progress-bar "$download_url" -o "${tmp_dir}/${name}.tar.gz"
+    tmp_dir=$(mktemp -d /tmp/${name}-XXXXXX)
 
-    # Stop service before replacing binary
+    curl -L --progress-bar "$url" -o "${tmp_dir}/${name}.tar.gz"
+
+    # Stop before replacing binary
     if systemctl is-active --quiet "$service_name" 2>/dev/null; then
         log "Stopping ${name^} for update..."
         systemctl stop "$service_name"
@@ -146,8 +140,7 @@ install_arr_app() {
     chown -R "${app_user}:${MEDIA_GROUP}" "$install_dir"
     chmod +x "${install_dir}/${binary}"
 
-    # --- Write systemd service ---
-    log "Writing systemd service: /etc/systemd/system/${service_name}..."
+    # --- Systemd service ---
     cat > "/etc/systemd/system/${service_name}" << SVCFILE
 [Unit]
 Description=${name^}
@@ -157,7 +150,7 @@ After=network.target
 Type=simple
 User=${app_user}
 Group=${MEDIA_GROUP}
-ExecStart=${install_dir}/${binary} ${data_arg}${config_dir}
+ExecStart=${install_dir}/${binary} ${data_flag}${config_dir}
 Restart=on-failure
 RestartSec=10
 TimeoutStopSec=20
@@ -177,106 +170,108 @@ SVCFILE
     log "${name^} installed and started."
 }
 
-install_jellyseerr() {
-    local name="jellyseerr"
-    local port="${APP_PORTS[$name]}"
-    local install_dir="${INSTALL_BASE}/${name}"
-    local config_dir="${CONFIG_BASE}/${name}"
-    local service_name="${name}.service"
-    local app_user="${name}"
+install_seerr_docker() {
+    log "=== Installing Seerr (Docker) ==="
 
-    log "=== Installing Jellyseerr ==="
-
-    # Jellyseerr needs Node.js
-    if ! command -v node &>/dev/null; then
-        log "Installing Node.js..."
-        curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
-        apt-get install -y nodejs
+    # --- Install Docker if needed ---
+    if ! command -v docker &>/dev/null; then
+        log "Installing Docker..."
+        curl -fsSL https://get.docker.com | sh
+        systemctl enable docker
+        systemctl start docker
     else
-        log "Node.js already installed: $(node --version)"
+        log "Docker already installed: $(docker --version)"
     fi
 
-    # --- Create user ---
-    if id "$app_user" &>/dev/null; then
-        log "User '$app_user' already exists."
-    else
-        log "Creating user: $app_user"
-        useradd \
-            --system \
-            --gid "$MEDIA_GROUP" \
-            --home-dir "$config_dir" \
-            --no-create-home \
-            --shell /usr/sbin/nologin \
-            --comment "Jellyseerr service user" \
-            "$app_user"
-    fi
-    usermod -aG "$MEDIA_GROUP" "$app_user"
+    # --- Config dir ---
+    mkdir -p "$SEERR_CONFIG"
+    # Seerr container runs as node user (UID 1000) - set ownership accordingly
+    chown -R 1000:1000 "$SEERR_CONFIG"
 
-    mkdir -p "$config_dir"
-    chown -R "${app_user}:${MEDIA_GROUP}" "$config_dir"
+    # --- Pull image ---
+    log "Pulling Seerr image..."
+    docker pull ghcr.io/seerr-team/seerr:latest
 
-    # --- Download latest release ---
-    log "Fetching latest Jellyseerr release..."
-    local download_url
-    download_url=$(get_latest_release_url "Fallenbagel/jellyseerr" "linux-arm64.tar.gz")
-    [[ -z "$download_url" ]] && die "Could not find Jellyseerr release URL."
-    log "Downloading: $download_url"
-
-    local tmp_dir
-    tmp_dir=$(mktemp -d /tmp/jellyseerr-install.XXXXXX)
-    curl -L --progress-bar "$download_url" -o "${tmp_dir}/jellyseerr.tar.gz"
-
-    if systemctl is-active --quiet "$service_name" 2>/dev/null; then
-        log "Stopping Jellyseerr for update..."
-        systemctl stop "$service_name"
+    # --- Remove existing container if present ---
+    if docker ps -a --format '{{.Names}}' | grep -q '^seerr$'; then
+        log "Removing existing Seerr container..."
+        docker rm -f seerr
     fi
 
-    log "Extracting to ${install_dir}..."
-    rm -rf "$install_dir"
-    mkdir -p "$install_dir"
-    tar -xzf "${tmp_dir}/jellyseerr.tar.gz" -C "$install_dir" --strip-components=1
-    rm -rf "$tmp_dir"
-
-    chown -R "${app_user}:${MEDIA_GROUP}" "$install_dir"
-
-    # --- Write systemd service ---
-    cat > "/etc/systemd/system/${service_name}" << SVCFILE
+    # --- Write systemd service for Docker container ---
+    cat > "/etc/systemd/system/seerr.service" << SVCFILE
 [Unit]
-Description=Jellyseerr
-After=network.target
+Description=Seerr
+After=network.target docker.service
+Requires=docker.service
 
 [Service]
 Type=simple
-User=${app_user}
-Group=${MEDIA_GROUP}
-WorkingDirectory=${install_dir}
-ExecStart=/usr/bin/node ${install_dir}/dist/index.js
+ExecStartPre=-/usr/bin/docker rm -f seerr
+ExecStart=/usr/bin/docker run --rm \
+    --name seerr \
+    --init \
+    -e LOG_LEVEL=info \
+    -e PORT=${SEERR_PORT} \
+    -p ${SEERR_PORT}:${SEERR_PORT} \
+    -v ${SEERR_CONFIG}:/app/config \
+    --restart no \
+    ghcr.io/seerr-team/seerr:latest
+ExecStop=/usr/bin/docker stop seerr
 Restart=on-failure
 RestartSec=10
-TimeoutStopSec=20
-Environment="NODE_ENV=production"
-Environment="CONFIG_DIRECTORY=${config_dir}"
 StandardOutput=journal
 StandardError=journal
-SyslogIdentifier=jellyseerr
+SyslogIdentifier=seerr
 
 [Install]
 WantedBy=multi-user.target
 SVCFILE
 
     systemctl daemon-reload
-    systemctl enable "$service_name"
-    systemctl start "$service_name"
+    systemctl enable seerr.service
+    systemctl start seerr.service
 
-    log "Jellyseerr installed and started."
+    log "Seerr container started."
+}
+
+configure_root_folder() {
+    local name="$1"
+    local port="$2"
+    local path="$3"
+    local config_file="${CONFIG_BASE}/${name}/config.xml"
+    local api_key=""
+
+    log "Waiting for ${name^} config to initialize..."
+    for i in $(seq 1 30); do
+        if [[ -f "$config_file" ]]; then
+            api_key=$(grep -oP '(?<=<ApiKey>)[^<]+' "$config_file" 2>/dev/null || true)
+            [[ -n "$api_key" ]] && break
+        fi
+        sleep 2
+        echo -n "."
+    done
+    echo ""
+
+    if [[ -z "$api_key" ]]; then
+        warn "Could not read ${name^} API key. Set root folder manually: http://<ip>:${port}"
+        return
+    fi
+
+    log "Setting ${name^} root folder: $path"
+    curl -sf --max-time 5 \
+        -H "X-Api-Key: ${api_key}" \
+        -H "Content-Type: application/json" \
+        -d "{\"path\":\"${path}\"}" \
+        "http://localhost:${port}/api/v3/rootfolder" &>/dev/null \
+        && log "${name^} root folder set to: $path" \
+        || warn "Could not set ${name^} root folder via API — set it manually in the UI."
 }
 
 # --- Validate ---
 [[ -z "$DATA_ROOT" ]] && die "Usage: sudo $0 /path/to/data/root"
 [[ "$EUID" -ne 0 ]]   && die "Please run as root (sudo)"
 [[ ! -d "$DATA_ROOT" ]] && die "Data root '$DATA_ROOT' does not exist. Run setup-qbittorrent.sh first."
-
-# media group must exist (created by setup-qbittorrent.sh)
 getent group "$MEDIA_GROUP" &>/dev/null || die "'$MEDIA_GROUP' group not found. Run setup-qbittorrent.sh first."
 
 # --- Packages ---
@@ -287,16 +282,14 @@ apt-get update -qq
 log "Checking required packages..."
 ensure_package curl
 ensure_package tar
-ensure_package sqlite3  # used by all arr apps
+ensure_package sqlite3
 
 # --- Install arr apps ---
-# Pattern matches arm64 tarballs from each app's GitHub releases
-
 install_arr_app \
     "prowlarr" \
     "Prowlarr/Prowlarr" \
     "${APP_PORTS[prowlarr]}" \
-    "linux-arm64.tar.gz" \
+    "linux-core-arm64.tar.gz" \
     "Prowlarr" \
     "--data="
 
@@ -312,50 +305,15 @@ install_arr_app \
     "radarr" \
     "Radarr/Radarr" \
     "${APP_PORTS[radarr]}" \
-    "linux-arm64.tar.gz" \
+    "linux-core-arm64.tar.gz" \
     "Radarr" \
     "-data="
 
-install_jellyseerr
+install_seerr_docker
 
-# --- Configure media folders in Sonarr and Radarr ---
-# These apps need a moment to initialize their databases before we can
-# configure them via API. We'll wait and then set the root folders.
+# --- Configure media root folders ---
 log "Waiting for apps to initialize before configuring media folders..."
 sleep 15
-
-configure_root_folder() {
-    local name="$1"
-    local port="$2"
-    local path="$3"
-
-    # Get API key from config
-    local config_file="${CONFIG_BASE}/${name}/config.xml"
-    local api_key=""
-    for i in $(seq 1 30); do
-        if [[ -f "$config_file" ]]; then
-            api_key=$(grep -oP '(?<=<ApiKey>)[^<]+' "$config_file" || true)
-            [[ -n "$api_key" ]] && break
-        fi
-        sleep 2
-        echo -n "."
-    done
-    echo ""
-
-    if [[ -z "$api_key" ]]; then
-        warn "Could not read API key for ${name^}. Set root folder manually in the UI."
-        return
-    fi
-
-    log "Configuring ${name^} root folder: $path"
-    curl -sf --max-time 5 \
-        -H "X-Api-Key: ${api_key}" \
-        -H "Content-Type: application/json" \
-        -d "{\"path\":\"${path}\"}" \
-        "http://localhost:${port}/api/v3/rootfolder" &>/dev/null \
-        && log "${name^} root folder set to: $path" \
-        || warn "Could not set ${name^} root folder via API. Set it manually in the UI."
-}
 
 configure_root_folder "sonarr" "${APP_PORTS[sonarr]}" "${DATA_ROOT}/media/tv"
 configure_root_folder "radarr" "${APP_PORTS[radarr]}" "${DATA_ROOT}/media/movies"
@@ -363,20 +321,26 @@ configure_root_folder "radarr" "${APP_PORTS[radarr]}" "${DATA_ROOT}/media/movies
 # --- Verify all services ---
 echo ""
 log "Verifying all services..."
-FAILED_SERVICES=()
+FAILED=()
 
-for app in prowlarr sonarr radarr jellyseerr; do
-    port="${APP_PORTS[$app]}"
+for app in prowlarr sonarr radarr; do
     if systemctl is-active --quiet "${app}.service" 2>/dev/null; then
-        log "  [OK] ${app^}: running (port ${port})"
+        log "  [OK] ${app^} (port ${APP_PORTS[$app]})"
     else
-        warn "  [FAIL] ${app^}: not running"
-        FAILED_SERVICES+=("$app")
+        warn "  [FAIL] ${app^} not running"
+        FAILED+=("$app")
     fi
 done
 
-if [[ ${#FAILED_SERVICES[@]} -gt 0 ]]; then
-    warn "The following services failed to start: ${FAILED_SERVICES[*]}"
+if systemctl is-active --quiet "seerr.service" 2>/dev/null; then
+    log "  [OK] Seerr (port ${SEERR_PORT})"
+else
+    warn "  [FAIL] Seerr not running"
+    FAILED+=("seerr")
+fi
+
+if [[ ${#FAILED[@]} -gt 0 ]]; then
+    warn "Failed services: ${FAILED[*]}"
     warn "Check logs: journalctl -u <service> -n 50"
 else
     log "All services running."
@@ -386,18 +350,18 @@ fi
 echo ""
 log "=== Setup complete ==="
 echo ""
-log "Service URLs (replace <ip> with your machine's LAN IP):"
-log "  Prowlarr:   http://<ip>:9696  — add indexers here first"
-log "  Radarr:     http://<ip>:7878  — movies"
-log "  Sonarr:     http://<ip>:8989  — TV shows"
-log "  Jellyseerr: http://<ip>:5055  — request UI"
+log "Service URLs (replace <ip> with your LAN IP):"
+log "  Prowlarr:  http://<ip>:9696  — add indexers here first"
+log "  Radarr:    http://<ip>:7878  — movies"
+log "  Sonarr:    http://<ip>:8989  — TV shows"
+log "  Seerr:     http://<ip>:5055  — request UI"
 echo ""
-log "Next steps:"
+log "Wiring order:"
 log "  1. Prowlarr: add your indexers"
-log "  2. Prowlarr: add Sonarr and Radarr as apps (Settings > Apps)"
-log "  3. Radarr/Sonarr: add qBittorrent as download client (Settings > Download Clients)"
-log "     Host: localhost, Port: 8080, no auth needed from localhost"
-log "  4. Jellyseerr: connect to Jellyfin, then Radarr and Sonarr"
+log "  2. Prowlarr: connect to Sonarr + Radarr (Settings > Apps)"
+log "  3. Sonarr + Radarr: add qBittorrent (Settings > Download Clients)"
+log "     Host: localhost  Port: 8080  No auth needed"
+log "  4. Seerr: connect to Jellyfin, then Sonarr + Radarr"
 echo ""
-log "media group members:"
+log "media group:"
 getent group "$MEDIA_GROUP"
