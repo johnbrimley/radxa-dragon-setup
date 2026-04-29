@@ -214,7 +214,7 @@ fi
 # for API calls from localhost. Works on first run and re-runs alike.
 log "Applying settings via API (no auth required from localhost)..."
 
-PREFS_JSON='{"web_ui_password":"adminadmin","current_network_interface":"'${WG_IFACE}'","upnp":false,"anonymous_mode":true,"encryption":1,"dht":false,"pex":false,"lsd":false,"up_limit":1,"resolve_peer_countries":false}'
+PREFS_JSON='{"web_ui_password":"adminadmin","current_network_interface":"'${WG_IFACE}'","upnp":false,"anonymous_mode":true,"encryption":1,"dht":false,"pex":false,"lsd":false,"up_limit":1024,"resolve_peer_countries":false}'
 
 if curl -sf --max-time 5 \
     --data-urlencode "json=${PREFS_JSON}" \
@@ -252,7 +252,7 @@ check_setting "encryption"               "1"               "Encryption (forced)"
 check_setting "dht"                       "False"           "DHT"
 check_setting "pex"                       "False"           "Peer exchange"
 check_setting "lsd"                       "False"           "Local service discovery"
-check_setting "up_limit"                  "1"               "Upload limit (KiB/s)"
+check_setting "up_limit"                  "1024"            "Upload limit (1 KiB/s)"
 check_setting "resolve_peer_countries"    "False"           "Resolve peer countries"
 
 if [[ "$VERIFY_FAILED" -eq 1 ]]; then
