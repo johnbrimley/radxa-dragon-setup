@@ -214,16 +214,54 @@ fi
 # for API calls from localhost. Works on first run and re-runs alike.
 log "Applying settings via API (no auth required from localhost)..."
 
-PREFS_JSON='{"web_ui_password":"adminadmin","network_interface":"'${WG_IFACE}'","upnp":false,"natpmp":false}'
+PREFS_JSON='{"web_ui_password":"adminadmin","current_network_interface":"'${WG_IFACE}'","upnp":false,"natpmp":false}'
 
 if curl -sf --max-time 5 \
     --data-urlencode "json=${PREFS_JSON}" \
     "http://localhost:${WEBUI_PORT}/api/v2/app/setPreferences" &>/dev/null; then
-    log "Password set to adminadmin, interface locked to ${WG_IFACE}, UPnP/NAT-PMP disabled."
+    log "Settings applied. Verifying..."
 else
-    warn "Failed to apply settings via API."
-    warn "Manually verify: interface=${WG_IFACE}, UPnP=off, NAT-PMP=off in the web UI."
+    die "Failed to apply settings via API. Check: journalctl -u $QBT_SERVICE -n 50"
 fi
+
+# --- Verify settings were applied correctly ---
+VERIFY=$(curl -sf --max-time 5 "http://localhost:${WEBUI_PORT}/api/v2/app/preferences" 2>/dev/null || true)
+if [[ -z "$VERIFY" ]]; then
+    die "Could not read back preferences for verification."
+fi
+
+ACTUAL_IFACE=$(echo "$VERIFY" | python3 -c "import sys,json; p=json.load(sys.stdin); print(p.get('current_network_interface',''))")
+ACTUAL_UPNP=$(echo "$VERIFY"  | python3 -c "import sys,json; p=json.load(sys.stdin); print(p.get('upnp',''))")
+ACTUAL_NATPMP=$(echo "$VERIFY" | python3 -c "import sys,json; p=json.load(sys.stdin); print(p.get('natpmp',''))")
+
+VERIFY_FAILED=0
+
+if [[ "$ACTUAL_IFACE" == "$WG_IFACE" ]]; then
+    log "  [OK] Network interface: $ACTUAL_IFACE"
+else
+    warn "  [FAIL] Network interface: expected=$WG_IFACE actual=$ACTUAL_IFACE"
+    VERIFY_FAILED=1
+fi
+
+if [[ "$ACTUAL_UPNP" == "False" ]]; then
+    log "  [OK] UPnP: disabled"
+else
+    warn "  [FAIL] UPnP: expected=False actual=$ACTUAL_UPNP"
+    VERIFY_FAILED=1
+fi
+
+if [[ "$ACTUAL_NATPMP" == "False" ]]; then
+    log "  [OK] NAT-PMP: disabled"
+else
+    warn "  [FAIL] NAT-PMP: expected=False actual=$ACTUAL_NATPMP"
+    VERIFY_FAILED=1
+fi
+
+if [[ "$VERIFY_FAILED" -eq 1 ]]; then
+    die "One or more settings did not apply correctly. Check the qBittorrent web UI."
+fi
+
+log "All settings verified."
 
 # --- Write port forwarding sync script ---
 # Polls /run/protonvpn/forwarded-port and updates qBittorrent's listen port
