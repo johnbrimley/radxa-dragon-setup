@@ -71,6 +71,13 @@ grep -q '^\[Interface\]' "$CONF_SRC" || die "File does not look like a WireGuard
 grep -q '^\[Peer\]'      "$CONF_SRC" || die "File does not look like a WireGuard config (missing [Peer])"
 
 # --- Packages ---
+# Suppress interactive prompts during package installation.
+# iptables-persistent asks whether to save current rules - we answer no
+# here and save explicitly ourselves after setup so we control what's saved.
+export DEBIAN_FRONTEND=noninteractive
+echo "iptables-persistent iptables-persistent/autosave_v4 boolean false" | debconf-set-selections
+echo "iptables-persistent iptables-persistent/autosave_v6 boolean false" | debconf-set-selections
+
 log "Updating package lists..."
 apt-get update -qq
 
@@ -299,6 +306,14 @@ if ! ip link show "${WG_IFACE}" &>/dev/null 2>&1; then
     die "${WG_IFACE} did not come up. Check: journalctl -u wg-quick@${WG_IFACE} -n 50"
 fi
 log "Interface ${WG_IFACE} is up."
+
+# --- Save iptables rules (kill switch) so they persist across reboot ---
+# We do this explicitly now that WireGuard is up and the rules are active,
+# rather than letting iptables-persistent prompt during install.
+log "Saving iptables rules for persistence across reboots..."
+iptables-save  > /etc/iptables/rules.v4
+ip6tables-save > /etc/iptables/rules.v6
+log "iptables rules saved."
 
 # --- Start port forwarding service ---
 log "Starting port forwarding keepalive..."
