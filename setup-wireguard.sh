@@ -44,10 +44,13 @@ ensure_package() {
 detect_lan_subnet() {
     # Find directly connected RFC1918 subnets (scope link = on-link, no gateway)
     # Excludes loopback and any existing WireGuard interfaces
-    while read -r dest _ rest; do
-        local iface
-        iface=$(echo "$rest" | grep -oP '(?<=dev\s)\S+' || true)
-        [[ -z "$iface" ]] && continue
+    # Format: "192.168.1.0/24 dev enp1s0 proto kernel src 192.168.1.x metric 100"
+    while read -r line; do
+        local dest iface
+        dest=$(echo "$line" | awk '{print $1}')
+        iface=$(echo "$line" | grep -oP '(?<=dev )\S+' || true)
+
+        [[ -z "$dest" || -z "$iface" ]] && continue
         [[ "$iface" == "lo" ]] && continue
         [[ "$iface" == wg* ]] && continue
 
