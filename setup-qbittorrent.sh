@@ -214,7 +214,7 @@ fi
 # for API calls from localhost. Works on first run and re-runs alike.
 log "Applying settings via API (no auth required from localhost)..."
 
-PREFS_JSON='{"web_ui_password":"adminadmin","current_network_interface":"'${WG_IFACE}'","upnp":false,"natpmp":false}'
+PREFS_JSON='{"web_ui_password":"adminadmin","current_network_interface":"'${WG_IFACE}'","upnp":false,"anonymous_mode":true,"encryption":1,"dht":false,"pex":false,"lsd":false,"up_limit":1,"resolve_peer_countries":false}'
 
 if curl -sf --max-time 5 \
     --data-urlencode "json=${PREFS_JSON}" \
@@ -230,32 +230,30 @@ if [[ -z "$VERIFY" ]]; then
     die "Could not read back preferences for verification."
 fi
 
-ACTUAL_IFACE=$(echo "$VERIFY" | python3 -c "import sys,json; p=json.load(sys.stdin); print(p.get('current_network_interface',''))")
-ACTUAL_UPNP=$(echo "$VERIFY"  | python3 -c "import sys,json; p=json.load(sys.stdin); print(p.get('upnp',''))")
-ACTUAL_NATPMP=$(echo "$VERIFY" | python3 -c "import sys,json; p=json.load(sys.stdin); print(p.get('natpmp',''))")
-
+# Read back all settings and verify each one
 VERIFY_FAILED=0
 
-if [[ "$ACTUAL_IFACE" == "$WG_IFACE" ]]; then
-    log "  [OK] Network interface: $ACTUAL_IFACE"
-else
-    warn "  [FAIL] Network interface: expected=$WG_IFACE actual=$ACTUAL_IFACE"
-    VERIFY_FAILED=1
-fi
+check_setting() {
+    local key="$1" expected="$2" label="$3"
+    local actual
+    actual=$(echo "$VERIFY" | python3 -c "import sys,json; p=json.load(sys.stdin); print(p.get('${key}','MISSING'))")
+    if [[ "$actual" == "$expected" ]]; then
+        log "  [OK] ${label}: $actual"
+    else
+        warn "  [FAIL] ${label}: expected=$expected actual=$actual"
+        VERIFY_FAILED=1
+    fi
+}
 
-if [[ "$ACTUAL_UPNP" == "False" ]]; then
-    log "  [OK] UPnP: disabled"
-else
-    warn "  [FAIL] UPnP: expected=False actual=$ACTUAL_UPNP"
-    VERIFY_FAILED=1
-fi
-
-if [[ "$ACTUAL_NATPMP" == "False" ]]; then
-    log "  [OK] NAT-PMP: disabled"
-else
-    warn "  [FAIL] NAT-PMP: expected=False actual=$ACTUAL_NATPMP"
-    VERIFY_FAILED=1
-fi
+check_setting "current_network_interface" "$WG_IFACE"      "Network interface"
+check_setting "upnp"                      "False"           "UPnP"
+check_setting "anonymous_mode"            "True"            "Anonymous mode"
+check_setting "encryption"               "1"               "Encryption (forced)"
+check_setting "dht"                       "False"           "DHT"
+check_setting "pex"                       "False"           "Peer exchange"
+check_setting "lsd"                       "False"           "Local service discovery"
+check_setting "up_limit"                  "1"               "Upload limit (KiB/s)"
+check_setting "resolve_peer_countries"    "False"           "Resolve peer countries"
 
 if [[ "$VERIFY_FAILED" -eq 1 ]]; then
     die "One or more settings did not apply correctly. Check the qBittorrent web UI."
