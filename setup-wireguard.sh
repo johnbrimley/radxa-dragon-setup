@@ -75,7 +75,26 @@ log "Updating package lists..."
 apt-get update -qq
 
 log "Checking required packages..."
-ensure_package wireguard
+
+# Check for WireGuard kernel support directly rather than relying on the
+# wireguard meta-package, which can be broken on custom/Armbian kernels.
+# WireGuard is built into mainline kernels >= 5.6, so the module or
+# built-in support should always be present on a modern image.
+log "Checking WireGuard kernel support..."
+ensure_package kmod  # needed for modprobe/lsmod
+if lsmod | grep -q '^wireguard'; then
+    log "WireGuard module already loaded."
+elif modprobe wireguard 2>/dev/null; then
+    log "WireGuard module loaded successfully."
+else
+    # Could be built-in (=y) rather than a module (=m) - check that too
+    if grep -qE '^CONFIG_WIREGUARD=y' /boot/config-"$(uname -r)" 2>/dev/null; then
+        log "WireGuard is built into the kernel (=y), no module needed."
+    else
+        die "WireGuard kernel support not found. Your kernel may not include WireGuard. Check: grep WIREGUARD /boot/config-\$(uname -r)"
+    fi
+fi
+
 ensure_package wireguard-tools
 ensure_package iptables
 ensure_package iptables-persistent
