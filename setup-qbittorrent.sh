@@ -20,6 +20,7 @@ DATA_ROOT="${1:-}"
 QBT_USER="qbt"
 MEDIA_GROUP="media"
 WEBUI_PORT=8080
+WG_IFACE="wg0"
 QBT_SERVICE="qbittorrent-nox.service"
 QBT_CONFIG_DIR="/home/${QBT_USER}/.config/qBittorrent"
 QBT_CONFIG="${QBT_CONFIG_DIR}/qBittorrent.conf"
@@ -42,6 +43,12 @@ ensure_package() {
 # --- Validate ---
 [[ -z "$DATA_ROOT" ]] && die "Usage: sudo $0 /path/to/data/root"
 [[ "$EUID" -ne 0 ]]   && die "Please run as root (sudo)"
+
+# WireGuard interface must exist - qBittorrent must bind to it exclusively
+if ! ip link show "$WG_IFACE" &>/dev/null 2>&1; then
+    die "WireGuard interface '$WG_IFACE' not found. Run setup-wireguard.sh first, then re-run this script."
+fi
+log "WireGuard interface $WG_IFACE is present."
 
 # Warn if the data root doesn't exist yet (e.g. external drive not mounted)
 if [[ ! -d "$DATA_ROOT" ]]; then
@@ -202,38 +209,21 @@ else
     die "qBittorrent did not respond after 60s. Check: journalctl -u $QBT_SERVICE -n 50"
 fi
 
-# --- Set web UI password ---
-# qBittorrent 5.x generates a random temporary password on first run.
-# Sniff it from the journal, use it to authenticate, then set our own password.
-log "Looking for temporary password in journal..."
-TEMP_PASS=""
-for i in $(seq 1 10); do
-    TEMP_PASS=$(journalctl -u "$QBT_SERVICE" -n 50 --no-pager 2>/dev/null         | grep -oP '(?<=temporary password is provided for this session: )\S+'         | tail -1 || true)
-    [[ -n "$TEMP_PASS" ]] && break
-    sleep 1
-done
+# --- Apply settings via API ---
+# LocalHostAuth=false is set in the config file so no authentication is needed
+# for API calls from localhost. Works on first run and re-runs alike.
+log "Applying settings via API (no auth required from localhost)..."
 
-if [[ -z "$TEMP_PASS" ]]; then
-    warn "Could not find temporary password in journal."
-    warn "qBittorrent may have already been initialized with a password."
-    warn "If login fails, check: journalctl -u $QBT_SERVICE -n 50 | grep -i password"
+PREFS_JSON='{"web_ui_password":"adminadmin","network_interface":"'${WG_IFACE}'","upnp":false,"natpmp":false}'
+
+if curl -sf --max-time 5 \
+    --data-urlencode "json=${PREFS_JSON}" \
+    "http://localhost:${WEBUI_PORT}/api/v2/app/setPreferences" &>/dev/null; then
+    log "Password set to adminadmin, interface locked to ${WG_IFACE}, UPnP/NAT-PMP disabled."
 else
-    log "Temporary password found. Authenticating..."
-    COOKIE_JAR=$(mktemp /tmp/qbt-setup-cookies.XXXXXX)
-
-    LOGIN_RESULT=$(curl -sf --max-time 5         --cookie-jar "$COOKIE_JAR"         --data "username=admin&password=${TEMP_PASS}"         "http://localhost:${WEBUI_PORT}/api/v2/auth/login" 2>/dev/null || true)
-
-    if [[ "$LOGIN_RESULT" == "Ok." ]]; then
-        log "Authenticated. Setting permanent password..."
-        curl -sf --max-time 5             --cookie "$COOKIE_JAR"             --data 'json={"web_ui_password":"adminadmin"}'             "http://localhost:${WEBUI_PORT}/api/v2/app/setPreferences" &>/dev/null             && log "Password set to: adminadmin"             || warn "Failed to set password via API."
-    else
-        warn "Login with temporary password failed: $LOGIN_RESULT"
-        warn "Manual login may be required. Check journal for the temp password."
-    fi
-
-    rm -f "$COOKIE_JAR"
+    warn "Failed to apply settings via API."
+    warn "Manually verify: interface=${WG_IFACE}, UPnP=off, NAT-PMP=off in the web UI."
 fi
-
 
 # --- Write port forwarding sync script ---
 # Polls /run/protonvpn/forwarded-port and updates qBittorrent's listen port
@@ -251,42 +241,23 @@ cat > "$QBT_PORTSYNC_SCRIPT" << 'PSCRIPT'
 set -euo pipefail
 
 QBT_URL="http://localhost:8080"
-QBT_USER="admin"
-QBT_PASS="adminadmin"
 PORT_FILE="/run/protonvpn/forwarded-port"
-COOKIE_JAR="/tmp/qbt-port-sync-cookies.txt"
 POLL_INTERVAL=60   # check every 60s; port file refreshes every 45s
+
+# No authentication needed - LocalHostAuth=false is set in qBittorrent config
 
 log()  { echo "$(date '+%Y-%m-%dT%H:%M:%S') [qbt-port-sync] $*"; }
 warn() { echo "$(date '+%Y-%m-%dT%H:%M:%S') [qbt-port-sync] WARN: $*"; }
 
-qbt_login() {
-    rm -f "$COOKIE_JAR"
-    local result
-    result=$(curl -sf \
-        --cookie-jar "$COOKIE_JAR" \
-        --data "username=${QBT_USER}&password=${QBT_PASS}" \
-        "${QBT_URL}/api/v2/auth/login" 2>&1) || true
-
-    if [[ "$result" == "Ok." ]]; then
-        return 0
-    else
-        warn "Login failed: $result"
-        return 1
-    fi
-}
-
 qbt_set_port() {
     local port="$1"
     curl -sf \
-        --cookie "$COOKIE_JAR" \
         --data "json={\"listen_port\":${port},\"random_port\":false}" \
         "${QBT_URL}/api/v2/app/setPreferences" &>/dev/null || return 1
 }
 
 qbt_get_port() {
     curl -sf \
-        --cookie "$COOKIE_JAR" \
         "${QBT_URL}/api/v2/app/preferences" \
         | grep -oP '(?<="listen_port":)\d+' || echo "0"
 }
@@ -317,17 +288,12 @@ while true; do
     if [[ "$CURRENT_PORT" != "$LAST_PORT" ]]; then
         log "Port changed: ${LAST_PORT:-none} -> $CURRENT_PORT - updating qBittorrent..."
 
-        # Login to get a fresh session cookie
-        if qbt_login; then
-            if qbt_set_port "$CURRENT_PORT"; then
-                ACTIVE_PORT=$(qbt_get_port)
-                log "qBittorrent listen port updated to: $ACTIVE_PORT"
-                LAST_PORT="$CURRENT_PORT"
-            else
-                warn "Failed to set port - will retry next poll"
-            fi
+        if qbt_set_port "$CURRENT_PORT"; then
+            ACTIVE_PORT=$(qbt_get_port)
+            log "qBittorrent listen port updated to: $ACTIVE_PORT"
+            LAST_PORT="$CURRENT_PORT"
         else
-            warn "Could not authenticate with qBittorrent - is it running?"
+            warn "Failed to set port - is qBittorrent running?"
         fi
     fi
 
