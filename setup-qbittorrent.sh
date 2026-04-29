@@ -202,6 +202,38 @@ else
     die "qBittorrent did not respond after 60s. Check: journalctl -u $QBT_SERVICE -n 50"
 fi
 
+# --- Set web UI password ---
+# qBittorrent 5.x generates a random temporary password on first run.
+# Sniff it from the journal, use it to authenticate, then set our own password.
+log "Looking for temporary password in journal..."
+TEMP_PASS=""
+for i in $(seq 1 10); do
+    TEMP_PASS=$(journalctl -u "$QBT_SERVICE" -n 50 --no-pager 2>/dev/null         | grep -oP '(?<=temporary password is provided for this session: )\S+'         | tail -1 || true)
+    [[ -n "$TEMP_PASS" ]] && break
+    sleep 1
+done
+
+if [[ -z "$TEMP_PASS" ]]; then
+    warn "Could not find temporary password in journal."
+    warn "qBittorrent may have already been initialized with a password."
+    warn "If login fails, check: journalctl -u $QBT_SERVICE -n 50 | grep -i password"
+else
+    log "Temporary password found. Authenticating..."
+    COOKIE_JAR=$(mktemp /tmp/qbt-setup-cookies.XXXXXX)
+
+    LOGIN_RESULT=$(curl -sf --max-time 5         --cookie-jar "$COOKIE_JAR"         --data "username=admin&password=${TEMP_PASS}"         "http://localhost:${WEBUI_PORT}/api/v2/auth/login" 2>/dev/null || true)
+
+    if [[ "$LOGIN_RESULT" == "Ok." ]]; then
+        log "Authenticated. Setting permanent password..."
+        curl -sf --max-time 5             --cookie "$COOKIE_JAR"             --data 'json={"web_ui_password":"adminadmin"}'             "http://localhost:${WEBUI_PORT}/api/v2/app/setPreferences" &>/dev/null             && log "Password set to: adminadmin"             || warn "Failed to set password via API."
+    else
+        warn "Login with temporary password failed: $LOGIN_RESULT"
+        warn "Manual login may be required. Check journal for the temp password."
+    fi
+
+    rm -f "$COOKIE_JAR"
+fi
+
 
 # --- Write port forwarding sync script ---
 # Polls /run/protonvpn/forwarded-port and updates qBittorrent's listen port
