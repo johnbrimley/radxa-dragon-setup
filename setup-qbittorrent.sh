@@ -183,9 +183,11 @@ fi
 systemctl start "$QBT_SERVICE"
 
 # --- Verify ---
-log "Waiting for qBittorrent web UI to respond (up to 20s)..."
-for i in $(seq 1 20); do
-    if curl -sf "http://localhost:${WEBUI_PORT}" &>/dev/null; then
+log "Waiting for qBittorrent web UI to respond (up to 60s)..."
+QBT_READY=0
+for i in $(seq 1 60); do
+    if curl -sf --max-time 2 "http://localhost:${WEBUI_PORT}/api/v2/app/version" &>/dev/null; then
+        QBT_READY=1
         break
     fi
     sleep 1
@@ -193,11 +195,11 @@ for i in $(seq 1 20); do
 done
 echo ""
 
-if curl -sf "http://localhost:${WEBUI_PORT}" &>/dev/null; then
-    log "Web UI is up."
+if [[ "$QBT_READY" -eq 1 ]]; then
+    QBT_VERSION=$(curl -sf --max-time 2 "http://localhost:${WEBUI_PORT}/api/v2/app/version" 2>/dev/null || true)
+    log "Web UI is up. qBittorrent version: $QBT_VERSION"
 else
-    warn "Web UI did not respond - may still be initializing."
-    warn "Check: journalctl -u $QBT_SERVICE -f"
+    die "qBittorrent did not respond after 60s. Check: journalctl -u $QBT_SERVICE -n 50"
 fi
 
 
