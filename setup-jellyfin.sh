@@ -68,7 +68,44 @@ else
 fi
 
 # --- Install Jellyfin ---
-ensure_package jellyfin
+# Detect the OS and pick the matching Jellyfin package variant.
+# Jellyfin publishes both +ubu2004 and +deb13 builds and apt may pick
+# the wrong one. We detect which distro we're on and pin accordingly
+# so this works correctly regardless of when it's run.
+log "Detecting OS for Jellyfin package selection..."
+
+OS_ID=$(grep "^ID=" /etc/os-release | cut -d= -f2 | tr -d '"')
+OS_VERSION=$(grep "^VERSION_CODENAME=" /etc/os-release | cut -d= -f2 | tr -d '"')
+
+log "Detected OS: ${OS_ID} ${OS_VERSION}"
+
+case "${OS_ID}:${OS_VERSION}" in
+    debian:trixie)   PKG_SUFFIX="deb13" ;;
+    debian:bookworm) PKG_SUFFIX="deb12" ;;
+    debian:bullseye) PKG_SUFFIX="deb11" ;;
+    ubuntu:focal)    PKG_SUFFIX="ubu2004" ;;
+    ubuntu:jammy)    PKG_SUFFIX="ubu2204" ;;
+    ubuntu:noble)    PKG_SUFFIX="ubu2404" ;;
+    *)
+        warn "Unrecognized OS: ${OS_ID} ${OS_VERSION}"
+        warn "Attempting to find any compatible Jellyfin version..."
+        PKG_SUFFIX=""
+        ;;
+esac
+
+if [[ -n "$PKG_SUFFIX" ]]; then
+    JELLYFIN_VERSION=$(apt-cache madison jellyfin         | grep "${PKG_SUFFIX}"         | head -1         | awk '{print $3}')
+else
+    # Fall back to whatever is available and hope for the best
+    JELLYFIN_VERSION=$(apt-cache madison jellyfin         | head -1         | awk '{print $3}')
+fi
+
+if [[ -z "$JELLYFIN_VERSION" ]]; then
+    die "Could not find a compatible Jellyfin version for ${OS_ID} ${OS_VERSION}. Check: apt-cache madison jellyfin"
+fi
+
+log "Installing Jellyfin version: $JELLYFIN_VERSION"
+apt-get install -y     "jellyfin=${JELLYFIN_VERSION}"     "jellyfin-server=${JELLYFIN_VERSION}"     "jellyfin-web=${JELLYFIN_VERSION}"
 
 # --- Add jellyfin user to media group ---
 # This allows Jellyfin to read the shared media folders
