@@ -1,14 +1,15 @@
 #!/bin/bash
-# arr stack setup: Prowlarr + Sonarr + Radarr + Seerr (via Docker)
+# arr stack setup: Prowlarr + Sonarr + Radarr + Seerr + FlareSolverr (via Docker)
 #
 # All arr services run as dedicated users in the 'media' group.
-# Seerr runs as a Docker container bound to localhost:5055.
+# Seerr and FlareSolverr run as Docker containers.
 #
 # Ports:
-#   Prowlarr:  http://<ip>:9696
-#   Radarr:    http://<ip>:7878
-#   Sonarr:    http://<ip>:8989
-#   Seerr:     http://<ip>:5055
+#   Prowlarr:     http://<ip>:9696
+#   Radarr:       http://<ip>:7878
+#   Sonarr:       http://<ip>:8989
+#   Seerr:        http://<ip>:5055
+#   FlareSolverr: http://localhost:8191 (localhost only)
 #
 # Usage: sudo ./setup-arr.sh /path/to/data/root
 # Example: sudo ./setup-arr.sh /srv/media
@@ -24,6 +25,7 @@ INSTALL_BASE="/opt"
 CONFIG_BASE="/var/lib"
 SEERR_CONFIG="/var/lib/seerr"
 SEERR_PORT=5055
+FLARESOLVERR_PORT=8191
 
 declare -A APP_PORTS=(
     [prowlarr]="9696"
@@ -76,6 +78,17 @@ wait_for_service() {
     warn "${name} did not respond after ${timeout}s - may still be initializing."
     warn "Check: journalctl -u ${name} -n 50"
     return 1
+}
+
+install_docker() {
+    if ! command -v docker &>/dev/null; then
+        log "Installing Docker..."
+        curl -fsSL https://get.docker.com | sh
+        systemctl enable docker
+        systemctl start docker
+    else
+        log "Docker already installed: $(docker --version)"
+    fi
 }
 
 install_arr_app() {
@@ -173,19 +186,11 @@ SVCFILE
 install_seerr_docker() {
     log "=== Installing Seerr (Docker) ==="
 
-    # --- Install Docker if needed ---
-    if ! command -v docker &>/dev/null; then
-        log "Installing Docker..."
-        curl -fsSL https://get.docker.com | sh
-        systemctl enable docker
-        systemctl start docker
-    else
-        log "Docker already installed: $(docker --version)"
-    fi
+    install_docker
 
     # --- Config dir ---
     mkdir -p "$SEERR_CONFIG"
-    # Seerr container runs as node user (UID 1000) - set ownership accordingly
+    # Seerr container runs as node user (UID 1000)
     chown -R 1000:1000 "$SEERR_CONFIG"
 
     # --- Pull image ---
@@ -198,7 +203,6 @@ install_seerr_docker() {
         docker rm -f seerr
     fi
 
-    # --- Write systemd service for Docker container ---
     cat > "/etc/systemd/system/seerr.service" << SVCFILE
 [Unit]
 Description=Seerr
@@ -233,6 +237,56 @@ SVCFILE
     systemctl start seerr.service
 
     log "Seerr container started."
+}
+
+install_flaresolverr_docker() {
+    log "=== Installing FlareSolverr (Docker) ==="
+
+    install_docker
+
+    # --- Pull image ---
+    log "Pulling FlareSolverr image..."
+    docker pull ghcr.io/flaresolverr/flaresolverr:latest
+
+    # --- Remove existing container if present ---
+    if docker ps -a --format '{{.Names}}' | grep -q '^flaresolverr$'; then
+        log "Removing existing FlareSolverr container..."
+        docker rm -f flaresolverr
+    fi
+
+    # Bound to localhost only - Prowlarr talks to it internally,
+    # no reason to expose it on the LAN
+    cat > "/etc/systemd/system/flaresolverr.service" << SVCFILE
+[Unit]
+Description=FlareSolverr
+After=network.target docker.service
+Requires=docker.service
+
+[Service]
+Type=simple
+ExecStartPre=-/usr/bin/docker rm -f flaresolverr
+ExecStart=/usr/bin/docker run --rm \
+    --name flaresolverr \
+    -e LOG_LEVEL=info \
+    -p 127.0.0.1:${FLARESOLVERR_PORT}:${FLARESOLVERR_PORT} \
+    --restart no \
+    ghcr.io/flaresolverr/flaresolverr:latest
+ExecStop=/usr/bin/docker stop flaresolverr
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=flaresolverr
+
+[Install]
+WantedBy=multi-user.target
+SVCFILE
+
+    systemctl daemon-reload
+    systemctl enable flaresolverr.service
+    systemctl start flaresolverr.service
+
+    log "FlareSolverr started on localhost:${FLARESOLVERR_PORT}."
 }
 
 configure_root_folder() {
@@ -310,6 +364,7 @@ install_arr_app \
     "-data="
 
 install_seerr_docker
+install_flaresolverr_docker
 
 # --- Configure media root folders ---
 log "Waiting for apps to initialize before configuring media folders..."
@@ -339,6 +394,13 @@ else
     FAILED+=("seerr")
 fi
 
+if systemctl is-active --quiet "flaresolverr.service" 2>/dev/null; then
+    log "  [OK] FlareSolverr (localhost:${FLARESOLVERR_PORT})"
+else
+    warn "  [FAIL] FlareSolverr not running"
+    FAILED+=("flaresolverr")
+fi
+
 if [[ ${#FAILED[@]} -gt 0 ]]; then
     warn "Failed services: ${FAILED[*]}"
     warn "Check logs: journalctl -u <service> -n 50"
@@ -351,17 +413,20 @@ echo ""
 log "=== Setup complete ==="
 echo ""
 log "Service URLs (replace <ip> with your LAN IP):"
-log "  Prowlarr:  http://<ip>:9696  — add indexers here first"
-log "  Radarr:    http://<ip>:7878  — movies"
-log "  Sonarr:    http://<ip>:8989  — TV shows"
-log "  Seerr:     http://<ip>:5055  — request UI"
+log "  Prowlarr:     http://<ip>:9696  — add indexers here first"
+log "  Radarr:       http://<ip>:7878  — movies"
+log "  Sonarr:       http://<ip>:8989  — TV shows"
+log "  Seerr:        http://<ip>:5055  — request UI"
+log "  FlareSolverr: localhost:8191    — Cloudflare bypass (Prowlarr only)"
 echo ""
 log "Wiring order:"
-log "  1. Prowlarr: add your indexers"
-log "  2. Prowlarr: connect to Sonarr + Radarr (Settings > Apps)"
-log "  3. Sonarr + Radarr: add qBittorrent (Settings > Download Clients)"
+log "  1. Prowlarr: add FlareSolverr (Settings > Indexers > Proxies > Add > FlareSolverr)"
+log "     URL: http://localhost:8191"
+log "  2. Prowlarr: add your indexers, assign FlareSolverr proxy to Cloudflare-protected ones"
+log "  3. Prowlarr: connect to Sonarr + Radarr (Settings > Apps)"
+log "  4. Sonarr + Radarr: add qBittorrent (Settings > Download Clients)"
 log "     Host: localhost  Port: 8080  No auth needed"
-log "  4. Seerr: connect to Jellyfin, then Sonarr + Radarr"
+log "  5. Seerr: connect to Jellyfin, then Sonarr + Radarr"
 echo ""
 log "media group:"
 getent group "$MEDIA_GROUP"
