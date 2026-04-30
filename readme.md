@@ -188,16 +188,39 @@ sudo ./setup-jellyfin.sh /srv/media
 
 All configuration below is done in the browser. Do it in this order — each app depends on the one before it.
 
-### Step 1 — Prowlarr: Add Indexers
+### Step 1 — Prowlarr: Add FlareSolverr
 
-Indexers are the torrent sites Prowlarr searches on behalf of Sonarr and Radarr.
+FlareSolverr lets Prowlarr bypass Cloudflare protection on indexers that use it (including 1337x and EZTV). It runs locally and Prowlarr is the only thing that talks to it.
 
 1. Browse to `http://<ip>:9696`
-2. Go to **Settings > Indexers > Add Indexer**
-3. Search for your preferred indexers and add them
-4. Test each one after adding — green means working
+2. Go to **Settings > Indexers > Proxies > Add Proxy**
+3. Select **FlareSolverr**
+   - Name: `FlareSolverr`
+   - Host: `http://localhost:8191`
+4. Click **Test** then **Save**
 
-### Step 2 — Prowlarr: Connect to Sonarr and Radarr
+### Step 2 — Prowlarr: Add Indexers
+
+Indexers are the torrent sites Prowlarr searches on behalf of Sonarr and Radarr. Good starting points for TV and movies:
+
+**Public (no account needed):**
+- **1337x** — well organized, broad coverage
+- **EZTV** — TV focused
+- **YTS** — movies, small file sizes
+
+**Private (invite only, better quality):**
+- **BTN (BroadcasTheNet)** — TV, ratio-less
+- **MoreThan.TV** — TV, ratio-less
+- **PTP (PassThePopcorn)** — movies
+
+To add an indexer:
+1. Go to **Settings > Indexers > Add Indexer**
+2. Search by name and select it
+3. For private trackers, enter your account credentials or passkey
+4. Assign the FlareSolverr proxy to indexers that need it (most public ones)
+5. Test each one after adding — green means working
+
+### Step 3 — Prowlarr: Connect to Sonarr and Radarr
 
 This syncs your indexers to both apps automatically so you don't have to configure them separately.
 
@@ -209,7 +232,7 @@ This syncs your indexers to both apps automatically so you don't have to configu
 3. Add **Radarr** the same way using port `7878`
 4. Click **Sync App Indexers** — Prowlarr pushes all indexers to both apps
 
-### Step 3 — Radarr: Add qBittorrent as Download Client
+### Step 4 — Radarr: Add qBittorrent as Download Client
 
 1. Browse to `http://<ip>:7878`
 2. Go to **Settings > Download Clients > Add**
@@ -220,11 +243,11 @@ This syncs your indexers to both apps automatically so you don't have to configu
    - Category: `movies`
 4. Click **Test** — should show a green checkmark
 
-### Step 4 — Sonarr: Add qBittorrent as Download Client
+### Step 5 — Sonarr: Add qBittorrent as Download Client
 
 Same as Radarr but at `http://<ip>:8989` with category: `tv`
 
-### Step 5 — Jellyfin: Initial Setup
+### Step 6 — Jellyfin: Initial Setup
 
 1. Browse to `http://<ip>:8096`
 2. Create your admin account
@@ -234,7 +257,7 @@ Same as Radarr but at `http://<ip>:8989` with category: `tv`
 4. Complete the wizard and let the initial library scan finish
 5. Generate an API key: **Dashboard > API Keys > +** — copy it for the next step
 
-### Step 6 — Seerr: Connect Everything
+### Step 7 — Seerr: Connect Everything
 
 1. Browse to `http://<ip>:5055`
 2. Connect to **Jellyfin:**
@@ -302,6 +325,7 @@ For cases where Seerr isn't finding something or you want more control:
 | `sonarr` | systemd | 8989 | TV show automation |
 | `radarr` | systemd | 7878 | Movie automation |
 | `seerr` | Docker / systemd | 5055 | Media request UI |
+| `flaresolverr` | Docker / systemd | 8191 (localhost only) | Cloudflare bypass for indexers |
 | `jellyfin` | systemd | 8096 | Media streaming |
 
 ---
