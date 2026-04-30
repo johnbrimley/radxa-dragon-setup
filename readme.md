@@ -196,8 +196,10 @@ FlareSolverr lets Prowlarr bypass Cloudflare protection on indexers that use it 
 2. Go to **Settings > Indexers > Proxies > Add Proxy**
 3. Select **FlareSolverr**
    - Name: `FlareSolverr`
-   - Host: `http://localhost:8191`
+   - Host: `http://172.17.0.1:8191`
 4. Click **Test** then **Save**
+
+> **Note:** FlareSolverr runs in Docker so Prowlarr must reach it via the Docker bridge IP (`172.17.0.1`) rather than `localhost`. This IP is stable and won't change on reboots unless Docker's network configuration is explicitly changed.
 
 ### Step 2 — Prowlarr: Add Indexers
 
