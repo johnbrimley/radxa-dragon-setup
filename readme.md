@@ -184,6 +184,112 @@ sudo ./setup-jellyfin.sh /srv/media
 
 ---
 
+## Wiring the Stack Together
+
+All configuration below is done in the browser. Do it in this order — each app depends on the one before it.
+
+### Step 1 — Prowlarr: Add Indexers
+
+Indexers are the torrent sites Prowlarr searches on behalf of Sonarr and Radarr.
+
+1. Browse to `http://<ip>:9696`
+2. Go to **Settings > Indexers > Add Indexer**
+3. Search for your preferred indexers and add them
+4. Test each one after adding — green means working
+
+### Step 2 — Prowlarr: Connect to Sonarr and Radarr
+
+This syncs your indexers to both apps automatically so you don't have to configure them separately.
+
+1. Go to **Settings > Apps**
+2. Add **Sonarr:**
+   - Prowlarr Server: `http://localhost:9696`
+   - Sonarr Server: `http://localhost:8989`
+   - API Key: copy from Sonarr under **Settings > General > API Key**
+3. Add **Radarr** the same way using port `7878`
+4. Click **Sync App Indexers** — Prowlarr pushes all indexers to both apps
+
+### Step 3 — Radarr: Add qBittorrent as Download Client
+
+1. Browse to `http://<ip>:7878`
+2. Go to **Settings > Download Clients > Add**
+3. Select **qBittorrent:**
+   - Host: `localhost`
+   - Port: `8080`
+   - Username/Password: leave blank (localhost auth bypass is enabled)
+   - Category: `movies`
+4. Click **Test** — should show a green checkmark
+
+### Step 4 — Sonarr: Add qBittorrent as Download Client
+
+Same as Radarr but at `http://<ip>:8989` with category: `tv`
+
+### Step 5 — Jellyfin: Initial Setup
+
+1. Browse to `http://<ip>:8096`
+2. Create your admin account
+3. Add media libraries when prompted:
+   - **Movies:** `/srv/media/media/movies`
+   - **TV Shows:** `/srv/media/media/tv`
+4. Complete the wizard and let the initial library scan finish
+5. Generate an API key: **Dashboard > API Keys > +** — copy it for the next step
+
+### Step 6 — Seerr: Connect Everything
+
+1. Browse to `http://<ip>:5055`
+2. Connect to **Jellyfin:**
+   - URL: `http://localhost:8096`
+   - API Key: paste from Step 5
+   - Click **Sign In** and select your admin user
+3. Connect to **Radarr:**
+   - Default Server: yes
+   - Host: `localhost`, Port: `7878`
+   - API Key: from Radarr under **Settings > General > API Key**
+   - Quality Profile: pick your preference
+   - Root Folder: `/srv/media/media/movies`
+4. Connect to **Sonarr** the same way using port `8989` and root `/srv/media/media/tv`
+5. Complete the Seerr setup wizard
+
+---
+
+## Basic Usage
+
+### Requesting Content via Seerr
+
+Seerr is the main interface for day-to-day use — you shouldn't need to touch Radarr or Sonarr directly for normal requests.
+
+1. Browse to `http://<ip>:5055`
+2. Search for a movie or TV show
+3. Click **Request**
+4. For TV shows, select specific seasons or request all
+5. The request flows automatically: Seerr → Radarr/Sonarr → Prowlarr finds a release → qBittorrent downloads → files land in `/srv/media/media/` → Jellyfin picks them up on its next scan
+
+Jellyfin scans libraries periodically, but you can trigger an immediate scan: **Dashboard > Libraries > Scan All Libraries**
+
+### Watching Content via Jellyfin
+
+- **Browser:** `http://<ip>:8096`
+- **Shield Pro:** Install the Jellyfin app from the Play Store, or use **Streamyfin** for a more polished experience with built-in Seerr request support
+- **Mobile:** Jellyfin has official iOS and Android apps
+
+### Monitoring Downloads
+
+qBittorrent web UI at `http://<ip>:8080` — useful for checking download progress and managing the queue directly. You shouldn't need it often since Sonarr/Radarr manage qBittorrent automatically.
+
+### Adding Content Directly in Radarr/Sonarr
+
+For cases where Seerr isn't finding something or you want more control:
+
+**Radarr** — `http://<ip>:7878`
+1. Click **+ Add Movie**, search, select quality profile and root folder
+2. Radarr searches indexers automatically, or click **Search** manually on the movie page
+
+**Sonarr** — `http://<ip>:8989`
+1. Click **+ Add Series**, search, configure, add
+2. Select which seasons to monitor
+
+---
+
 ## Service Overview
 
 | Service | Type | Port | Manages |
