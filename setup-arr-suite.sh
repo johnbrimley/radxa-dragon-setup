@@ -286,7 +286,8 @@ SVCFILE
     systemctl enable flaresolverr.service
     systemctl start flaresolverr.service
 
-    log "FlareSolverr started on localhost:${FLARESOLVERR_PORT}."
+    log "FlareSolverr started."
+log "In Prowlarr, use URL: http://172.17.0.1:${FLARESOLVERR_PORT} (Docker bridge IP, not localhost)"
 }
 
 configure_root_folder() {
